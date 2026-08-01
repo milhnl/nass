@@ -1,9 +1,10 @@
 use base64::{Engine as _, engine::general_purpose};
 use nass::himitsu_to_totp;
+use nass::keyandquery::{HimitsuKey, HimitsuQuery};
 use nass::optparser::{Argument, OptParser};
 use nass::proto;
+use nass::state::Repository;
 use nass::state::pass::{himitsu_to_pass_files, pass_file_to_himitsu};
-use nass::state::{HimitsuQuery, Repository};
 use std::env;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -16,9 +17,8 @@ fn main() -> Result<(), String> {
         path: &str,
     ) -> Result<(), String> {
         if path == "/" {
-            let keys = connection.query(
-                HimitsuQuery::from_components([format!("path")]).unwrap(),
-                false,
+            let keys = connection.disclose(
+                HimitsuQuery::from_components(["path".to_string()]).unwrap(),
             )?;
             let mut pass_files = himitsu_to_pass_files(keys.iter())
                 .into_keys()
@@ -57,13 +57,12 @@ fn main() -> Result<(), String> {
                 print_path(&path);
             });
         } else {
-            let keys = connection.query(
+            let keys = connection.disclose(
                 HimitsuQuery::from_components([format!(
                     "path={}",
                     path.strip_prefix('/').unwrap_or(path)
                 )])
                 .unwrap(),
-                true,
             )?;
             let pass_files = himitsu_to_pass_files(keys.iter());
 
@@ -90,7 +89,7 @@ fn main() -> Result<(), String> {
                 &input,
             )
             .into_iter()
-            .map(|key| connection.add(HimitsuQuery::try_from(key).unwrap()))
+            .map(|key| connection.add(key))
             .collect::<Result<Vec<_>, String>>()
             .map(|_| ())
         }
@@ -98,10 +97,9 @@ fn main() -> Result<(), String> {
             while optparser.next_opt().is_some() {}
             let name = optparser.next().ok_or("missing path")?;
             let name = name.strip_prefix('/').unwrap_or(&name);
-            let keys = connection.query(
+            let keys = connection.disclose(
                 HimitsuQuery::from_components([format!("path={name}")])
                     .unwrap(),
-                true,
             )?;
             let pass_files = himitsu_to_pass_files(keys.iter());
             let original = match pass_files.len() {
@@ -168,9 +166,7 @@ fn main() -> Result<(), String> {
             )?;
             pass_file_to_himitsu(name, &edited)
                 .into_iter()
-                .map(|key| {
-                    connection.add(HimitsuQuery::try_from(key).unwrap())
-                })
+                .map(|key| connection.add(key))
                 .collect::<Result<Vec<_>, String>>()
                 .map(|_| ())
         }
@@ -178,13 +174,12 @@ fn main() -> Result<(), String> {
             while optparser.next_opt().is_some() {}
             let name = optparser.next().ok_or("missing path")?;
             let name = name.strip_prefix('/').unwrap_or(&name);
-            let mut keys = connection.query(
+            let mut keys = connection.disclose(
                 HimitsuQuery::from_components([
                     "proto=totp".into(),
                     format!("path={name}"),
                 ])
                 .unwrap(),
-                true,
             )?;
             match keys.len() {
                 1 => (),
@@ -236,20 +231,16 @@ fn main() -> Result<(), String> {
                 .map_err(|_| "Could not generate new password")?;
             let out = general_purpose::STANDARD.encode(&random.stdout);
             connection
-                .add(
-                    HimitsuQuery::from_components([
-                        "proto=file".into(),
-                        format!("path={name}"),
-                        format!("content!={out}"),
-                    ])
-                    .unwrap(),
-                )
+                .add(HimitsuKey(vec![
+                    ("proto".into(), (false, "file".into())),
+                    ("path".into(), (false, name.into())),
+                    ("content".into(), (true, out)),
+                ]))
                 .map(|_| ())
         }
         Some("grep") => {
-            let keys = connection.query(
-                HimitsuQuery::from_components([format!("path")]).unwrap(),
-                false,
+            let keys = connection.disclose(
+                HimitsuQuery::from_components(["path".to_string()]).unwrap(),
             )?;
             let pass_files = himitsu_to_pass_files(keys.iter());
             let opts = &optparser.collect::<Vec<String>>();

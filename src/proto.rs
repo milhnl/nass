@@ -1,8 +1,12 @@
-use crate::state::{HimitsuKey, HimitsuQuery, Repository};
+use crate::keyandquery::{
+    CompleteHimitsuKey, HimitsuKey, HimitsuQuery, RedactedHimitsuKey,
+};
+use crate::state::Repository;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 fn query_socket(
     connection: &mut BufReader<UnixStream>,
@@ -11,16 +15,16 @@ fn query_socket(
     connection
         .get_mut()
         .write(query.as_bytes())
-        .map_err(|_| "Failed at writing onto the unix stream")?;
-    //unix_stream
-    //    .shutdown(std::net::Shutdown::Write)
-    //    .map_err(|_| "Could not shutdown writing on the stream")?;
-    Ok(())
+        .map_err(|_| "Failed at writing onto the unix stream".to_owned())
+        .and(Ok(()))
 }
 
-fn parse_keys_response(
+fn parse_keys_response<Field>(
     connection: &mut impl BufRead,
-) -> Result<Vec<HimitsuKey>, String> {
+) -> Result<Vec<HimitsuKey<Field>>, String>
+where
+    HimitsuKey<Field>: FromStr,
+{
     let mut keys = Vec::new();
 
     for line in connection.lines() {
@@ -32,12 +36,8 @@ fn parse_keys_response(
             .unwrap_or((line.as_ref(), None))
         {
             ("key", Some(encoded)) => {
-                let key = HimitsuKey::from(encoded).ok_or_else(|| {
-                    format!(
-                        "Invalid key response:
-                      {encoded}"
-                    )
-                })?;
+                let key = HimitsuKey::<Field>::from_str(encoded)
+                    .map_err(|_| format!("Invalid key response: {encoded}"))?;
                 keys.push(key);
             }
             ("error", Some(error)) => {
@@ -71,51 +71,42 @@ impl Repository for HimitsuProtocol {
         Ok(Self { connection })
     }
 
-    fn add(&mut self, query: HimitsuQuery) -> Result<Vec<HimitsuKey>, String> {
-        query_socket(
-            &mut self.connection,
-            &("add ".to_owned() + &query.encode() + "\n"),
-        )
-        .and_then(|()| parse_keys_response(&mut self.connection))
+    fn add(
+        &mut self,
+        key: CompleteHimitsuKey,
+    ) -> Result<Vec<RedactedHimitsuKey>, String> {
+        query_socket(&mut self.connection, &format!("add {key}\n"))
+            .and_then(|()| parse_keys_response(&mut self.connection))
     }
     fn delete(
         &mut self,
         query: HimitsuQuery,
-    ) -> Result<Vec<HimitsuKey>, String> {
-        query_socket(
-            &mut self.connection,
-            &("del ".to_owned() + &query.encode() + "\n"),
-        )
-        .and_then(|()| parse_keys_response(&mut self.connection))
+    ) -> Result<Vec<RedactedHimitsuKey>, String> {
+        query_socket(&mut self.connection, &format!("del {query}\n"))
+            .and_then(|()| parse_keys_response(&mut self.connection))
     }
     fn query(
         &mut self,
         query: HimitsuQuery,
-        decrypt: bool,
-    ) -> Result<Vec<HimitsuKey>, String> {
-        query_socket(
-            &mut self.connection,
-            &("query ".to_owned()
-                + (if decrypt { "-d " } else { "" })
-                + &query.encode()
-                + "\n"),
-        )
-        .and_then(|()| parse_keys_response(&mut self.connection))
+    ) -> Result<Vec<RedactedHimitsuKey>, String> {
+        query_socket(&mut self.connection, &format!("query {query}\n"))
+            .and_then(|()| parse_keys_response(&mut self.connection))
+    }
+    fn disclose(
+        &mut self,
+        query: HimitsuQuery,
+    ) -> Result<Vec<CompleteHimitsuKey>, String> {
+        query_socket(&mut self.connection, &format!("query -d {query}\n"))
+            .and_then(|()| parse_keys_response(&mut self.connection))
     }
     fn update(
         &mut self,
         query: HimitsuQuery,
-        set_query: HimitsuQuery,
-    ) -> Result<Vec<HimitsuKey>, String> {
+        set: CompleteHimitsuKey,
+    ) -> Result<Vec<RedactedHimitsuKey>, String> {
         query_socket(
             &mut self.connection,
-            //TODO: probably wrong. test.
-            &("update ".to_owned()
-                + &query.encode()
-                + "\n"
-                + "set "
-                + &set_query.encode()
-                + "\n"),
+            &format!("update {query}\nset {set}\n"),
         )
         .and_then(|()| parse_keys_response(&mut self.connection))
     }

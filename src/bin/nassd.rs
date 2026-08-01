@@ -1,8 +1,7 @@
+use nass::keyandquery::HimitsuQuery;
 use nass::optparser::{Argument, OptParser};
-use nass::state::{
-    HimitsuQuery, MultiplexedRepository, Repository, RepositoryClient,
-};
-use shlex::split;
+use nass::state::{MultiplexedRepository, Repository, RepositoryClient};
+use shlex::{Quoter, split};
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -18,6 +17,18 @@ fn handle_client(
             .map_err(|_| "Failed at writing onto the unix stream")?;
         Ok(())
     }
+    fn reply_err(unix_stream: &mut UnixStream, err: impl AsRef<str>) {
+        reply(
+            unix_stream,
+            &format!(
+                "error {}\n",
+                Quoter::new().allow_nul(true).quote(err.as_ref()).unwrap()
+            ),
+        )
+        .unwrap_or_else(|err| {
+            eprintln!("Error while reporting an error to the client: {err}")
+        })
+    }
     let reader = BufReader::new(
         unix_stream.try_clone().map_err(|err| format!("{err}"))?,
     );
@@ -26,16 +37,18 @@ fn handle_client(
         let message = message.map_err(|err| format!("{err}"))?;
         match message.split_once(' ').unwrap_or((message.as_ref(), "")) {
             ("set", query) if update_query.is_some() => {
-                let Some(query) =
-                    split(query).and_then(HimitsuQuery::from_components)
-                else {
-                    reply(
-                        &mut unix_stream,
-                        "error \"could not parse query\"\n",
-                    )?;
-                    continue;
-                };
-                state.update(update_query.take().unwrap(), query)?;
+                query
+                    .parse()
+                    .and_then(|query| {
+                        state.update(update_query.take().unwrap(), query)
+                    })
+                    .and_then(|keys| {
+                        keys.into_iter().try_for_each(|key| {
+                            reply(&mut unix_stream, &format!("key {key}\n"))
+                        })
+                    })
+                    .and_then(|()| reply(&mut unix_stream, "end\n"))
+                    .unwrap_or_else(|err| reply_err(&mut unix_stream, err));
             }
             _ if update_query.is_some() => {
                 reply(
@@ -45,82 +58,38 @@ fn handle_client(
                 update_query = None;
             }
             ("update", query) => {
-                let Some(query) =
-                    split(query).and_then(HimitsuQuery::from_components)
-                else {
-                    reply(
-                        &mut unix_stream,
-                        "error \"could not parse query\"\n",
-                    )?;
-                    continue;
-                };
-                update_query = Some(query);
-                reply(&mut unix_stream, "update\n")?;
+                query
+                    .parse()
+                    .and_then(|query| {
+                        update_query = Some(query);
+                        reply(&mut unix_stream, "update\n")
+                    })
+                    .unwrap_or_else(|err| reply_err(&mut unix_stream, err));
             }
 
             ("status", _) => reply(&mut unix_stream, "status unlocked\n")?,
-            ("add", query) => {
-                let Some(query) =
-                    split(query).and_then(HimitsuQuery::from_components)
-                else {
-                    reply(
-                        &mut unix_stream,
-                        "error \"could not parse query\"\n",
-                    )?;
-                    continue;
-                };
-                println!("add {}", query.clone().encode());
-
-                reply(
-                    &mut unix_stream,
-                    &state
-                        .add(query)
-                        .and_then(|keys| {
-                            keys.iter()
-                                .map(|key| {
-                                    key.encode(false).map(|mut encoded_key| {
-                                        encoded_key.insert_str(0, "key ");
-                                        encoded_key.push('\n');
-                                        encoded_key
-                                    })
-                                })
-                                .chain(std::iter::once(Ok("end\n".into())))
-                                .collect::<Result<Vec<String>, String>>()
-                                .map(|keys| keys.join(""))
+            ("add", key) => {
+                key.parse()
+                    .and_then(|key| state.add(key))
+                    .and_then(|keys| {
+                        keys.into_iter().try_for_each(|key| {
+                            reply(&mut unix_stream, &format!("key {key}\n"))
                         })
-                        .unwrap_or_else(|err| format!("error \"{err}\"\n")),
-                )?;
+                    })
+                    .and_then(|()| reply(&mut unix_stream, "end\n"))
+                    .unwrap_or_else(|err| reply_err(&mut unix_stream, err));
             }
             ("del", query) => {
-                let Some(query) = split(query) else {
-                    reply(
-                        &mut unix_stream,
-                        "error \"could not parse query\"\n",
-                    )?;
-                    continue;
-                };
-                let query = HimitsuQuery::from_components(query).unwrap();
-                println!("del {}", query.clone().encode());
-
-                reply(
-                    &mut unix_stream,
-                    &state
-                        .delete(query)
-                        .and_then(|keys| {
-                            keys.iter()
-                                .map(|key| {
-                                    key.encode(false).map(|mut encoded_key| {
-                                        encoded_key.insert_str(0, "key ");
-                                        encoded_key.push('\n');
-                                        encoded_key
-                                    })
-                                })
-                                .chain(std::iter::once(Ok("end\n".into())))
-                                .collect::<Result<Vec<String>, String>>()
-                                .map(|keys| keys.join(""))
+                query
+                    .parse()
+                    .and_then(|query| state.delete(query))
+                    .and_then(|keys| {
+                        keys.into_iter().try_for_each(|key| {
+                            reply(&mut unix_stream, &format!("key {key}\n"))
                         })
-                        .unwrap_or_else(|err| format!("error \"{err}\"\n")),
-                )?;
+                    })
+                    .and_then(|()| reply(&mut unix_stream, "end\n"))
+                    .unwrap_or_else(|err| reply_err(&mut unix_stream, err));
             }
             ("query", query) => {
                 let Some(query) = split(query) else {
@@ -144,33 +113,38 @@ fn handle_client(
                         }
                     }
                 }
-                let query = HimitsuQuery::from_components(optparser).unwrap();
-                println!(
-                    "query {}{}",
-                    if decrypt { "-d " } else { "" },
-                    query.clone().encode()
-                );
-                reply(
-                    &mut unix_stream,
-                    &state
-                        .query(query, decrypt)
+                let query = HimitsuQuery::from_components(optparser);
+                if decrypt {
+                    query
+                        .and_then(|query| state.disclose(query))
                         .and_then(|keys| {
-                            keys.iter()
-                                .map(|key| {
-                                    key.encode(decrypt).map(
-                                        |mut encoded_key| {
-                                            encoded_key.insert_str(0, "key ");
-                                            encoded_key.push('\n');
-                                            encoded_key
-                                        },
-                                    )
-                                })
-                                .chain(std::iter::once(Ok("end\n".into())))
-                                .collect::<Result<Vec<String>, String>>()
-                                .map(|keys| keys.join(""))
+                            keys.into_iter().try_for_each(|key| {
+                                reply(
+                                    &mut unix_stream,
+                                    &format!("key {key}\n"),
+                                )
+                            })
                         })
-                        .unwrap_or_else(|err| format!("error \"{err}\"\n")),
-                )?;
+                        .and_then(|()| reply(&mut unix_stream, "end\n"))
+                        .unwrap_or_else(|err| {
+                            reply_err(&mut unix_stream, err)
+                        });
+                } else {
+                    query
+                        .and_then(|query| state.query(query))
+                        .and_then(|keys| {
+                            keys.into_iter().try_for_each(|key| {
+                                reply(
+                                    &mut unix_stream,
+                                    &format!("key {key}\n"),
+                                )
+                            })
+                        })
+                        .and_then(|()| reply(&mut unix_stream, "end\n"))
+                        .unwrap_or_else(|err| {
+                            reply_err(&mut unix_stream, err)
+                        });
+                }
             }
             (command, _) => reply(
                 &mut unix_stream,
@@ -186,7 +160,7 @@ fn main() -> Result<(), String> {
         PathBuf::from(env::var("XDG_RUNTIME_DIR").unwrap()).join("himitsu");
     if std::fs::metadata(&socket_path).is_ok() {
         std::fs::remove_file(&socket_path).map_err(|err| {
-            format!("Could not delete socket path {:?}: {}", &socket_path, err)
+            format!("Could not delete socket path {:?}: {}", socket_path, err)
         })?;
     }
     let listener = UnixListener::bind(&socket_path)

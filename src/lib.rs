@@ -1,3 +1,4 @@
+pub mod keyandquery;
 pub mod optparser;
 pub mod otp;
 pub mod proto;
@@ -5,20 +6,22 @@ pub mod state;
 
 use std::collections::HashMap;
 
+use keyandquery::CompleteHimitsuKey;
 use otp::Totp;
-use state::HimitsuKey;
 
-pub fn himitsu_to_totp(key: &HimitsuKey) -> Result<Totp, String> {
+pub fn himitsu_to_totp(key: &CompleteHimitsuKey) -> Result<Totp, String> {
     Totp::from_slices(
-        key.get_value("algorithm"),
-        key.get_value("issuer"),
-        key.get_value("label")
+        key.get("algorithm").map(|(_, v)| v.as_ref()),
+        key.get("issuer").map(|(_, v)| v.as_ref()),
+        key.get("label")
+            .map(|(_, v)| v.as_ref())
             .ok_or_else(|| format!("Key {key:?} is missing label"))?,
-        key.get_value("digits"),
-        key.get_value("period"),
-        key.get_value("secret")
+        key.get("digits").map(|(_, v)| v.as_ref()),
+        key.get("period").map(|(_, v)| v.as_ref()),
+        key.get("secret")
+            .map(|(_, v)| v.as_ref())
             .ok_or_else(|| format!("Key {key:?} is missing secret"))?,
-        key.get_value("label_issuer"),
+        key.get("label_issuer").map(|(_, v)| v.as_ref()),
         HashMap::new(),
     )
 }

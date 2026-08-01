@@ -1,7 +1,17 @@
+use nass::keyandquery::HimitsuQuery;
 use nass::optparser::{Argument, OptParser};
 use nass::proto::HimitsuProtocol;
-use nass::state::{HimitsuQuery, Repository};
+use nass::state::Repository;
 use std::env;
+
+fn check_one(one: bool, len: usize) -> Result<(), String> {
+    match len {
+        1 if one => Ok(()),
+        _ if !one => Ok(()),
+        0 => Err("Received no keys".to_string()),
+        _ => Err("Received multiple keys".to_string()),
+    }
+}
 
 fn main() -> Result<(), String> {
     let mut connection = HimitsuProtocol::new()?;
@@ -17,28 +27,15 @@ fn main() -> Result<(), String> {
         }
     }
     let query = optparser.collect::<Vec<String>>();
-    let keys = connection.query(
-        HimitsuQuery::from_components(query)
-            .ok_or_else(|| "Could not re-quote args".to_owned())?,
-        decrypt,
-    )?;
-
-    if one {
-        match keys.len() {
-            1 => (),
-            0 => return Err("Received no keys".to_string()),
-            _ => return Err("Received multiple keys".to_string()),
-        }
+    if decrypt {
+        let keys =
+            connection.disclose(HimitsuQuery::from_components(query)?)?;
+        check_one(one, keys.len())?;
+        keys.into_iter().for_each(|key| println!("{key}"))
+    } else {
+        let keys = connection.query(HimitsuQuery::from_components(query)?)?;
+        check_one(one, keys.len())?;
+        keys.into_iter().for_each(|key| println!("{key}"))
     }
-
-    match keys
-        .iter()
-        .map(|key| key.encode(decrypt))
-        .collect::<Result<Vec<_>, String>>()
-    {
-        Ok(keys) => keys.into_iter().for_each(|key| println!("{key}")),
-        Err(err) => eprintln!("{err}"),
-    }
-
     Ok(())
 }

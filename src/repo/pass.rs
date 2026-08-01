@@ -1,6 +1,9 @@
 use crate::himitsu_to_totp;
+use crate::keyandquery::{
+    CompleteHimitsuKey, HimitsuKey, HimitsuQuery, RedactedHimitsuKey,
+};
 use crate::otp::Totp;
-use crate::state::{HimitsuKey, KeyField, Repository};
+use crate::state::Repository;
 use base64::{Engine as _, engine::general_purpose};
 use regex::Regex;
 use std::collections::HashMap;
@@ -15,7 +18,7 @@ use walkdir::{DirEntry, WalkDir};
 pub struct PassRepository {
     root: PathBuf,
 
-    keys: Vec<HimitsuKey>,
+    keys: Vec<CompleteHimitsuKey>,
 }
 
 //enum PassRepositoryState {
@@ -70,11 +73,10 @@ impl Repository for PassRepository {
 
     fn add(
         &mut self,
-        query: super::HimitsuQuery,
-    ) -> Result<Vec<HimitsuKey>, String> {
-        let new_key = HimitsuKey::try_from(query).unwrap();
+        key: CompleteHimitsuKey,
+    ) -> Result<Vec<RedactedHimitsuKey>, String> {
         let prev = himitsu_to_pass_files(self.keys.iter());
-        let next = himitsu_to_pass_files(self.keys.iter().chain([&new_key]));
+        let next = himitsu_to_pass_files(self.keys.iter().chain([&key]));
         let res = std::iter::empty()
             .chain(
                 next.keys()
@@ -90,22 +92,23 @@ impl Repository for PassRepository {
                     .map_err(|err| err.to_string())
             }))
             .collect::<Result<(), String>>()
-            .map(|()| vec![new_key]);
+            .map(|()| vec![key]);
         self.keys = next
             .into_iter()
             .flat_map(|(k, v)| pass_file_to_himitsu(&k, &v))
             .collect();
-        res
+        res.map(|keys| keys.into_iter().map(|key| key.into()).collect())
     }
 
     fn delete(
         &mut self,
         query: super::HimitsuQuery,
-    ) -> Result<Vec<HimitsuKey>, String> {
+    ) -> Result<Vec<RedactedHimitsuKey>, String> {
         let prev = himitsu_to_pass_files(self.keys.iter());
-        let deleted =
-            self.keys.extract_if(.., |key| query.r#match(key)).collect();
-        eprintln!("deleted {:?}", deleted);
+        let deleted = self
+            .keys
+            .extract_if(.., |key| query.r#match(key))
+            .collect::<Vec<_>>();
         let next = himitsu_to_pass_files(self.keys.iter());
         let res = std::iter::empty()
             .chain(
@@ -127,45 +130,46 @@ impl Repository for PassRepository {
             .into_iter()
             .flat_map(|(k, v)| pass_file_to_himitsu(&k, &v))
             .collect();
-        res
+        res.map(|keys| keys.into_iter().map(|key| key.into()).collect())
     }
 
     fn query(
         &mut self,
-        query: super::HimitsuQuery,
-        decrypt: bool,
-    ) -> Result<Vec<HimitsuKey>, String> {
+        query: HimitsuQuery,
+    ) -> Result<Vec<RedactedHimitsuKey>, String> {
         Ok(self
             .keys
             .iter()
             .filter(|key| query.r#match(key))
             .cloned()
-            .map(|mut key| {
-                if !decrypt {
-                    key.0.iter_mut().for_each(|(_, value)| {
-                        if value.secret {
-                            value.value = None;
-                        }
-                    });
-                };
-                key
-            })
+            .map(|key| key.into())
+            .collect())
+    }
+
+    fn disclose(
+        &mut self,
+        query: HimitsuQuery,
+    ) -> Result<Vec<CompleteHimitsuKey>, String> {
+        Ok(self
+            .keys
+            .iter()
+            .filter(|key| query.r#match(key))
+            .cloned()
             .collect())
     }
 
     fn update(
         &mut self,
-        query: super::HimitsuQuery,
-        set_query: super::HimitsuQuery,
-    ) -> Result<Vec<HimitsuKey>, String> {
-        let new_key = HimitsuKey::try_from(set_query).unwrap();
+        query: HimitsuQuery,
+        set: CompleteHimitsuKey,
+    ) -> Result<Vec<RedactedHimitsuKey>, String> {
         let prev = himitsu_to_pass_files(self.keys.iter());
         self.keys.iter_mut().for_each(|key| {
             if query.r#match(key) {
-                key.update(new_key.clone())
+                key.update(set.clone())
             }
         });
-        let next = himitsu_to_pass_files(self.keys.iter().chain([&new_key]));
+        let next = himitsu_to_pass_files(self.keys.iter().chain([&set]));
         let res = std::iter::empty()
             .chain(
                 next.keys()
@@ -181,12 +185,12 @@ impl Repository for PassRepository {
                     .map_err(|err| err.to_string())
             }))
             .collect::<Result<(), String>>()
-            .map(|()| vec![new_key]);
+            .map(|()| vec![set]);
         self.keys = next
             .into_iter()
             .flat_map(|(k, v)| pass_file_to_himitsu(&k, &v))
             .collect();
-        res
+        res.map(|keys| keys.into_iter().map(|key| key.into()).collect())
     }
 }
 
@@ -265,7 +269,10 @@ static PROPERTY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)(?:^(?P<name>[[:alnum:]_]+):\s*(?P<value>.*))").unwrap()
 });
 
-pub fn pass_file_to_himitsu(path: &str, content: &str) -> Vec<HimitsuKey> {
+pub fn pass_file_to_himitsu(
+    path: &str,
+    content: &str,
+) -> Vec<CompleteHimitsuKey> {
     let mut otp: Option<&str> = None;
     let mut props = content
         .lines()
@@ -342,12 +349,7 @@ pub fn pass_file_to_himitsu(path: &str, content: &str) -> Vec<HimitsuKey> {
                 props
                     .iter()
                     .map(|(k, s, v)| {
-                        ((*k).to_string(), {
-                            KeyField {
-                                value: Some((*v).to_string()),
-                                secret: *s,
-                            }
-                        })
+                        ((*k).to_string(), { (*s, (*v).to_owned()) })
                     })
                     .collect::<Vec<_>>(),
             ))
@@ -373,14 +375,7 @@ pub fn pass_file_to_himitsu(path: &str, content: &str) -> Vec<HimitsuKey> {
                             .chain(otp.iter().map(|(k, v)| {
                                 (k, k == "secret", v.to_string())
                             }))
-                            .map(|(k, s, v)| {
-                                ((*k).to_string(), {
-                                    KeyField {
-                                        value: Some(v),
-                                        secret: s,
-                                    }
-                                })
-                            })
+                            .map(|(k, s, v)| ((*k).to_string(), { (s, v) }))
                             .collect::<Vec<_>>(),
                     )
                 }),
@@ -395,12 +390,7 @@ pub fn pass_file_to_himitsu(path: &str, content: &str) -> Vec<HimitsuKey> {
                 props
                     .iter()
                     .map(|(k, s, v)| {
-                        ((*k).to_string(), {
-                            KeyField {
-                                value: Some((*v).into()),
-                                secret: *s,
-                            }
-                        })
+                        ((*k).to_string(), (*s, v.to_owned().to_owned()))
                     })
                     .collect::<Vec<_>>(),
             )]
@@ -409,35 +399,35 @@ pub fn pass_file_to_himitsu(path: &str, content: &str) -> Vec<HimitsuKey> {
     }
 }
 
-pub fn himitsu_to_pass_files<'a, T: Iterator<Item = &'a HimitsuKey>>(
+pub fn himitsu_to_pass_files<
+    'a,
+    T: Iterator<Item = &'a CompleteHimitsuKey>,
+>(
     keys: T,
 ) -> HashMap<String, String> {
     let mut map = HashMap::<String, Vec<String>>::new();
     keys.for_each(|key| {
-        let Some(path) = key.get_value("path") else {
+        let Some((_, path)) = key.get("path") else {
             return;
         };
-        match key.get_value("proto") {
+        match key.get("proto").map(|(_, v)| v.as_ref()) {
             Some("web") => {
                 let pass_lines = map
                     .entry(path.to_string())
                     .or_insert(Vec::from(["".into()]));
-                if let Some(password) = key
-                    .get_value("password")
-                    .map(|password| password.to_string())
+                if let Some(password) =
+                    key.get("password").map(|password| password.1.to_owned())
                 {
                     pass_lines[0] = password;
                 }
                 key.0
                     .iter()
-                    .filter(|(k, v)| {
-                        k != "password" && k != "path" && v.value.is_some()
-                    })
-                    .for_each(|(k, v)| {
+                    .filter(|(k, _)| k != "password" && k != "path")
+                    .for_each(|(k, (_, v))| {
                         let encoded = format!(
                             "{}: {}",
                             if k == "host" { "url" } else { k.as_ref() },
-                            v.value.as_ref().unwrap().clone()
+                            v
                         );
                         if pass_lines.iter().all(|line| line != &encoded) {
                             pass_lines.push(encoded);
@@ -448,28 +438,20 @@ pub fn himitsu_to_pass_files<'a, T: Iterator<Item = &'a HimitsuKey>>(
                 let pass_lines = map
                     .entry(path.to_string())
                     .or_insert(Vec::from(["".into()]));
-                if key
-                    .get("secret")
-                    .map(|x| x.secret && x.value.is_none())
-                    .unwrap_or(false)
-                {
-                    pass_lines.push("otpauth:".into());
-                } else {
-                    match himitsu_to_totp(key) {
-                        Ok(totp) => {
-                            pass_lines.push(totp.to_uri());
-                        }
-                        Err(err) => eprintln!("{err}"),
+                match himitsu_to_totp(key) {
+                    Ok(totp) => {
+                        pass_lines.push(totp.to_uri());
                     }
+                    Err(err) => eprintln!("{err}"),
                 }
             }
-            Some("file") => {
+            Some("file")
                 if map
                     .insert(
                         path.to_string(),
-                        key.get_value("content")
+                        key.get("content")
                             .ok_or(())
-                            .and_then(|v| {
+                            .and_then(|(_, v)| {
                                 general_purpose::STANDARD
                                     .decode(v)
                                     .map_err(|err| eprintln!("{err}"))
@@ -482,10 +464,9 @@ pub fn himitsu_to_pass_files<'a, T: Iterator<Item = &'a HimitsuKey>>(
                             .unwrap_or_else(|_| Vec::new()),
                     )
                     .is_some()
-                {
+                => {
                     eprintln!("Double pass path detected. Weird");
                 }
-            }
             _ => (),
         }
     });
