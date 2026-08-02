@@ -1,11 +1,10 @@
 use nass::keyandquery::HimitsuQuery;
 use nass::optparser::{Argument, OptParser};
+use nass::proto::SOCKET_PATH;
 use nass::state::{MultiplexedRepository, Repository, RepositoryClient};
 use shlex::{Quoter, split};
-use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
 
 fn handle_client(
     mut unix_stream: UnixStream,
@@ -156,14 +155,14 @@ fn handle_client(
 }
 
 fn main() -> Result<(), String> {
-    let socket_path =
-        PathBuf::from(env::var("XDG_RUNTIME_DIR").unwrap()).join("himitsu");
-    if std::fs::metadata(&socket_path).is_ok() {
-        std::fs::remove_file(&socket_path).map_err(|err| {
+    let socket_path = SOCKET_PATH.as_deref()?;
+    eprintln!("{socket_path:?}");
+    if std::fs::metadata(socket_path).is_ok() {
+        std::fs::remove_file(socket_path).map_err(|err| {
             format!("Could not delete socket path {:?}: {}", socket_path, err)
         })?;
     }
-    let listener = UnixListener::bind(&socket_path)
+    let listener = UnixListener::bind(socket_path)
         .map_err(|err| format!("Couldn't bind: {err:?}"))?;
 
     //let state = start_state_service::<RepositoryMultiplexActor>()?;

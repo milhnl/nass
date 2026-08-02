@@ -45,7 +45,11 @@ impl PassRepository {
 
 impl Repository for PassRepository {
     fn new() -> Result<Self, String> {
-        let root = PathBuf::from(env::var_os("PASSWORD_STORE_DIR").unwrap());
+        let root = env::var_os("PASSWORD_STORE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                env::home_dir().unwrap().join(".password-store")
+            });
         Ok(Self {
             root,
             state: PassRepositoryState::HardLocked,

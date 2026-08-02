@@ -78,16 +78,32 @@ pub struct HimitsuProtocol {
     connection: BufReader<UnixStream>,
 }
 
+use std::sync::LazyLock;
+pub static SOCKET_PATH: LazyLock<Result<PathBuf, String>> =
+    LazyLock::new(|| {
+        env::var_os("XDG_RUNTIME_DIR")
+            .ok_or_else(|| "XDG_RUNTIME_DIR is not set".to_owned())
+            .or_else(|err| {
+                if std::env::consts::OS == "macos" {
+                    env::var_os("TMPDIR").ok_or_else(|| {
+                        "TMPDIR (macOS fallback) is not set".to_owned()
+                    })
+                } else {
+                    Err(err)
+                }
+            })
+            .map(PathBuf::from)
+            .map(|socket_root| socket_root.join("himitsu"))
+    });
+
 impl Repository for HimitsuProtocol {
     fn new() -> Result<Self, String> {
-        let socket_path = PathBuf::from(env::var("XDG_RUNTIME_DIR").unwrap())
-            .join("himitsu");
-        let connection = BufReader::new(
-            UnixStream::connect(socket_path)
-                .map_err(|_| "Could not create stream")?,
-        );
-
-        Ok(Self { connection })
+        Ok(Self {
+            connection: BufReader::new(
+                UnixStream::connect(SOCKET_PATH.as_deref()?)
+                    .map_err(|_| "Could not create stream")?,
+            ),
+        })
     }
 
     fn add(
