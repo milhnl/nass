@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+
+name="nassd"
+description="New password/secret store daemon"
+
+supervisor="supervise-daemon"
+command="$EXE"
+respawn_delay=2
+respawn_max=0
+
+start_pre() {
+	: "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR must be set for OpenRC user services}"
+}

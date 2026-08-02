@@ -1,0 +1,12 @@
+[Unit]
+Description=New password/secret store daemon
+
+[Service]
+Type=simple
+ExecStart=$EXE
+Environment=XDG_RUNTIME_DIR=%t
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target
