@@ -20,7 +20,7 @@ fn encode<'a>(s: &'a str) -> Cow<'a, str> {
     }
 }
 
-trait HimitsuQueryMatchable {
+pub trait HimitsuQueryMatchable {
     fn r#match(&self, query: &HimitsuQuery) -> bool;
 }
 
@@ -88,6 +88,17 @@ impl From<CompleteHimitsuKey> for RedactedHimitsuKey {
                 })
                 .collect(),
         )
+    }
+}
+
+impl HimitsuQueryMatchable for RedactedHimitsuKey {
+    fn r#match(&self, query: &HimitsuQuery) -> bool {
+        query.0.iter().all(|(qk, qv)| {
+            let Some(keyvalue) = self.get(qk) else {
+                return qv.optional;
+            };
+            qv.value.is_none() || keyvalue.as_ref() == qv.value.as_ref()
+        })
     }
 }
 
@@ -224,7 +235,7 @@ impl HimitsuQuery {
         ))
     }
 
-    pub fn r#match(&self, key: &CompleteHimitsuKey) -> bool {
+    pub fn r#match(&self, key: &impl HimitsuQueryMatchable) -> bool {
         key.r#match(self)
     }
 }

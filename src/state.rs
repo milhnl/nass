@@ -32,6 +32,14 @@ pub trait Repository: Send {
         query: HimitsuQuery,
         set: CompleteHimitsuKey,
     ) -> Result<Vec<RedactedHimitsuKey>, String>;
+    fn status(&mut self) -> Result<Option<LockStatus>, String>;
+    fn lock(&mut self, lock: LockStatus) -> Result<(), String>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum LockStatus {
+    Soft,
+    Hard,
 }
 
 //Thread API
@@ -56,6 +64,13 @@ pub enum Message {
         query: HimitsuQuery,
         set: CompleteHimitsuKey,
         reply: Sender<Result<Vec<RedactedHimitsuKey>, String>>,
+    },
+    Status {
+        reply: Sender<Result<Option<LockStatus>, String>>,
+    },
+    Lock {
+        lock: LockStatus,
+        reply: Sender<Result<(), String>>,
     },
 }
 
@@ -89,6 +104,12 @@ impl RepositoryClient {
                         Message::Update { query, set, reply } => reply
                             .send(T::update(&mut actor, query, set))
                             .unwrap(),
+                        Message::Status { reply } => {
+                            reply.send(T::status(&mut actor)).unwrap()
+                        }
+                        Message::Lock { lock, reply } => {
+                            reply.send(T::lock(&mut actor, lock)).unwrap()
+                        }
                     }
                 }
             });
@@ -140,6 +161,12 @@ impl Repository for RepositoryClient {
         set: CompleteHimitsuKey,
     ) -> Result<Vec<RedactedHimitsuKey>, String> {
         self.request(|reply| Message::Update { query, set, reply })
+    }
+    fn status(&mut self) -> Result<Option<LockStatus>, String> {
+        self.request(|reply| Message::Status { reply })
+    }
+    fn lock(&mut self, lock: LockStatus) -> Result<(), String> {
+        self.request(|reply| Message::Lock { lock, reply })
     }
 }
 
@@ -204,5 +231,23 @@ impl Repository for MultiplexedRepository {
             .map(|repository| repository.update(query.clone(), set.clone()))
             .collect::<Result<Vec<_>, _>>()
             .map(|keys| keys.into_iter().flatten().collect())
+    }
+    fn status(&mut self) -> Result<Option<LockStatus>, String> {
+        self.repositories
+            .iter_mut()
+            .map(|repository| repository.status())
+            .collect::<Result<Vec<_>, _>>()
+            .map(|locks| {
+                locks.into_iter().max().unwrap_or(Some(LockStatus::Hard))
+            })
+    }
+    fn lock(&mut self, lock: LockStatus) -> Result<(), String> {
+        self.repositories
+            .iter_mut()
+            .map(|repository| repository.lock(lock.clone()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            //TODO: Does not report later errors.
+            .collect::<Result<(), _>>()
     }
 }

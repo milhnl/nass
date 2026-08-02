@@ -3,7 +3,7 @@ use crate::keyandquery::{
     CompleteHimitsuKey, HimitsuKey, HimitsuQuery, RedactedHimitsuKey,
 };
 use crate::otp::Totp;
-use crate::state::Repository;
+use crate::state::{LockStatus, Repository};
 use base64::{Engine as _, engine::general_purpose};
 use regex::Regex;
 use std::collections::HashMap;
@@ -17,66 +17,47 @@ use walkdir::{DirEntry, WalkDir};
 
 pub struct PassRepository {
     root: PathBuf,
-
-    keys: Vec<CompleteHimitsuKey>,
+    state: PassRepositoryState,
 }
 
-//enum PassRepositoryState {
-//    HardLocked,
-//    SoftLocked(Vec<HimitsuKey>),
-//    Unlocked(Vec<HimitsuKey>),
-//}
+enum PassRepositoryState {
+    Unlocked(Vec<CompleteHimitsuKey>),
+    SoftLocked(Vec<RedactedHimitsuKey>),
+    HardLocked,
+}
+
+impl PassRepository {
+    fn unlocked(&mut self) -> Result<&mut Vec<CompleteHimitsuKey>, String> {
+        match &self.state {
+            PassRepositoryState::Unlocked(_) => {}
+            _ => {
+                self.state = PassRepositoryState::Unlocked(read_pass_files(
+                    &self.root,
+                )?);
+            }
+        };
+        match &mut self.state {
+            PassRepositoryState::Unlocked(keys) => Ok(keys),
+            _ => unreachable!("state was set to unlocked above"),
+        }
+    }
+}
 
 impl Repository for PassRepository {
     fn new() -> Result<Self, String> {
         let root = PathBuf::from(env::var_os("PASSWORD_STORE_DIR").unwrap());
-
-        let keys = nodes(&root)
-            .iter()
-            .filter(|x| x.file_type().is_file())
-            .flat_map(|file| {
-                let path = file.path();
-                Command::new("gpg")
-                    .args([std::ffi::OsStr::new("-qd"), path.as_os_str()])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .and_then(Child::wait_with_output)
-                    .map_err(|err| {
-                        format!("Could not start gpg for decryption: {}", err)
-                    })
-                    .and_then(|status| {
-                        if status.status.success() {
-                            Ok(String::from_utf8_lossy(&status.stdout)
-                                .to_string())
-                        } else {
-                            Err(String::from_utf8_lossy(&status.stderr)
-                                .to_string())
-                        }
-                    })
-                    .map(|value| {
-                        pass_file_to_himitsu(
-                            path.with_extension("")
-                                .strip_prefix(&root)
-                                .unwrap()
-                                .to_str()
-                                .unwrap(),
-                            value.as_ref(),
-                        )
-                    })
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<_>>();
-        Ok(Self { root, keys })
+        Ok(Self {
+            root,
+            state: PassRepositoryState::HardLocked,
+        })
     }
-
     fn add(
         &mut self,
         key: CompleteHimitsuKey,
     ) -> Result<Vec<RedactedHimitsuKey>, String> {
-        let prev = himitsu_to_pass_files(self.keys.iter());
-        let next = himitsu_to_pass_files(self.keys.iter().chain([&key]));
+        let keys = self.unlocked()?;
+        let prev = himitsu_to_pass_files(keys.iter());
+        let next = himitsu_to_pass_files(keys.iter().chain([&key]));
         let res = std::iter::empty()
             .chain(
                 next.keys()
@@ -93,10 +74,11 @@ impl Repository for PassRepository {
             }))
             .collect::<Result<(), String>>()
             .map(|()| vec![key]);
-        self.keys = next
-            .into_iter()
-            .flat_map(|(k, v)| pass_file_to_himitsu(&k, &v))
-            .collect();
+        self.state = PassRepositoryState::Unlocked(
+            next.into_iter()
+                .flat_map(|(k, v)| pass_file_to_himitsu(&k, &v))
+                .collect(),
+        );
         res.map(|keys| keys.into_iter().map(|key| key.into()).collect())
     }
 
@@ -104,12 +86,12 @@ impl Repository for PassRepository {
         &mut self,
         query: super::HimitsuQuery,
     ) -> Result<Vec<RedactedHimitsuKey>, String> {
-        let prev = himitsu_to_pass_files(self.keys.iter());
-        let deleted = self
-            .keys
+        let keys = self.unlocked()?;
+        let prev = himitsu_to_pass_files(keys.iter());
+        let deleted = keys
             .extract_if(.., |key| query.r#match(key))
             .collect::<Vec<_>>();
-        let next = himitsu_to_pass_files(self.keys.iter());
+        let next = himitsu_to_pass_files(keys.iter());
         let res = std::iter::empty()
             .chain(
                 next.keys()
@@ -126,10 +108,11 @@ impl Repository for PassRepository {
             }))
             .collect::<Result<(), String>>()
             .map(|()| deleted);
-        self.keys = next
-            .into_iter()
-            .flat_map(|(k, v)| pass_file_to_himitsu(&k, &v))
-            .collect();
+        self.state = PassRepositoryState::Unlocked(
+            next.into_iter()
+                .flat_map(|(k, v)| pass_file_to_himitsu(&k, &v))
+                .collect(),
+        );
         res.map(|keys| keys.into_iter().map(|key| key.into()).collect())
     }
 
@@ -137,23 +120,38 @@ impl Repository for PassRepository {
         &mut self,
         query: HimitsuQuery,
     ) -> Result<Vec<RedactedHimitsuKey>, String> {
-        Ok(self
-            .keys
-            .iter()
-            .filter(|key| query.r#match(key))
-            .cloned()
-            .map(|key| key.into())
-            .collect())
+        match &mut self.state {
+            PassRepositoryState::Unlocked(keys) => Ok(keys
+                .iter()
+                .cloned()
+                .map(|key| key.into())
+                .filter(|key| query.r#match(key))
+                .collect()),
+            PassRepositoryState::SoftLocked(keys) => Ok(keys
+                .iter()
+                .filter(|key| query.r#match(*key))
+                .cloned()
+                .collect()),
+            PassRepositoryState::HardLocked => {
+                let keys = self.unlocked()?;
+                Ok(keys
+                    .iter()
+                    .cloned()
+                    .map(|key| key.into())
+                    .filter(|key| query.r#match(key))
+                    .collect())
+            }
+        }
     }
 
     fn disclose(
         &mut self,
         query: HimitsuQuery,
     ) -> Result<Vec<CompleteHimitsuKey>, String> {
-        Ok(self
-            .keys
+        let keys = self.unlocked()?;
+        Ok(keys
             .iter()
-            .filter(|key| query.r#match(key))
+            .filter(|key| query.r#match(*key))
             .cloned()
             .collect())
     }
@@ -163,13 +161,14 @@ impl Repository for PassRepository {
         query: HimitsuQuery,
         set: CompleteHimitsuKey,
     ) -> Result<Vec<RedactedHimitsuKey>, String> {
-        let prev = himitsu_to_pass_files(self.keys.iter());
-        self.keys.iter_mut().for_each(|key| {
+        let keys = self.unlocked()?;
+        let prev = himitsu_to_pass_files(keys.iter());
+        keys.iter_mut().for_each(|key| {
             if query.r#match(key) {
                 key.update(set.clone())
             }
         });
-        let next = himitsu_to_pass_files(self.keys.iter().chain([&set]));
+        let next = himitsu_to_pass_files(keys.iter().chain([&set]));
         let res = std::iter::empty()
             .chain(
                 next.keys()
@@ -186,11 +185,40 @@ impl Repository for PassRepository {
             }))
             .collect::<Result<(), String>>()
             .map(|()| vec![set]);
-        self.keys = next
-            .into_iter()
-            .flat_map(|(k, v)| pass_file_to_himitsu(&k, &v))
-            .collect();
+        self.state = PassRepositoryState::Unlocked(
+            next.into_iter()
+                .flat_map(|(k, v)| pass_file_to_himitsu(&k, &v))
+                .collect(),
+        );
         res.map(|keys| keys.into_iter().map(|key| key.into()).collect())
+    }
+
+    fn status(&mut self) -> Result<Option<LockStatus>, String> {
+        match self.state {
+            PassRepositoryState::Unlocked(_) => Ok(None),
+            PassRepositoryState::SoftLocked(_) => Ok(Some(LockStatus::Soft)),
+            PassRepositoryState::HardLocked => Ok(Some(LockStatus::Hard)),
+        }
+    }
+
+    fn lock(&mut self, lock: LockStatus) -> Result<(), String> {
+        match lock {
+            LockStatus::Soft => {
+                if let PassRepositoryState::Unlocked(keys) = std::mem::replace(
+                    &mut self.state,
+                    PassRepositoryState::HardLocked,
+                ) {
+                    self.state = PassRepositoryState::SoftLocked(
+                        keys.into_iter().map(|key| key.into()).collect(),
+                    );
+                }
+                Ok(())
+            }
+            _ => {
+                self.state = PassRepositoryState::HardLocked;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -206,6 +234,46 @@ fn nodes(root: &Path) -> Vec<DirEntry> {
                 .unwrap_or(false)
         })
         .collect::<Vec<_>>()
+}
+
+fn read_pass_files(root: &Path) -> Result<Vec<CompleteHimitsuKey>, String> {
+    let keys = nodes(root)
+        .iter()
+        .filter(|x| x.file_type().is_file())
+        .flat_map(|file| {
+            let path = file.path();
+            Command::new("gpg")
+                .args([std::ffi::OsStr::new("-qd"), path.as_os_str()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .and_then(Child::wait_with_output)
+                .map_err(|err| {
+                    format!("Could not start gpg for decryption: {}", err)
+                })
+                .and_then(|status| {
+                    if status.status.success() {
+                        Ok(String::from_utf8_lossy(&status.stdout).to_string())
+                    } else {
+                        Err(String::from_utf8_lossy(&status.stderr)
+                            .to_string())
+                    }
+                })
+                .map(|value| {
+                    pass_file_to_himitsu(
+                        path.with_extension("")
+                            .strip_prefix(root)
+                            .unwrap()
+                            .to_str()
+                            .unwrap(),
+                        value.as_ref(),
+                    )
+                })
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    Ok(keys)
 }
 
 fn recipients_for(root: &Path, key: &str) -> Result<Vec<String>, String> {
@@ -463,10 +531,10 @@ pub fn himitsu_to_pass_files<
                             .map(|v| vec![v])
                             .unwrap_or_else(|_| Vec::new()),
                     )
-                    .is_some()
-                => {
-                    eprintln!("Double pass path detected. Weird");
-                }
+                    .is_some() =>
+            {
+                eprintln!("Double pass path detected. Weird");
+            }
             _ => (),
         }
     });

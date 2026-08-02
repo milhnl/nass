@@ -1,7 +1,7 @@
 use crate::keyandquery::{
     CompleteHimitsuKey, HimitsuKey, HimitsuQuery, RedactedHimitsuKey,
 };
-use crate::state::Repository;
+use crate::state::{LockStatus, Repository};
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -53,6 +53,25 @@ where
     }
 
     Err("Connection closed before an end response".into())
+}
+
+fn parse_single_response(
+    connection: &mut impl BufRead,
+) -> Result<String, String> {
+    let mut line = String::new();
+    connection
+        .read_line(&mut line)
+        .map_err(|err| err.to_string())
+        .and_then(|size| {
+            if size == 0 {
+                Err("No response from socket".to_owned())
+            } else {
+                if line.ends_with('\n') {
+                    line.pop();
+                }
+                Ok(line)
+            }
+        })
 }
 
 pub struct HimitsuProtocol {
@@ -109,5 +128,44 @@ impl Repository for HimitsuProtocol {
             &format!("update {query}\nset {set}\n"),
         )
         .and_then(|()| parse_keys_response(&mut self.connection))
+    }
+    fn status(&mut self) -> Result<Option<LockStatus>, String> {
+        query_socket(&mut self.connection, "status\n").and_then(|()| {
+            let line = parse_single_response(&mut self.connection)?;
+
+            match line
+                .split_once(' ')
+                .map(|(op, val)| (op, Some(val)))
+                .unwrap_or((line.as_ref(), None))
+            {
+                ("status", Some("unlocked")) => Ok(None),
+                ("status", Some("soft_locked")) => Ok(Some(LockStatus::Soft)),
+                ("status", Some("hard_locked")) => Ok(Some(LockStatus::Hard)),
+                ("error", Some(error)) => Err(error.to_owned()),
+                _ => Err(format!("Unknown response: {line}")),
+            }
+        })
+    }
+    fn lock(&mut self, lock: LockStatus) -> Result<(), String> {
+        query_socket(
+            &mut self.connection,
+            &format!(
+                "lock{}\n",
+                if lock == LockStatus::Soft { " -s" } else { "" }
+            ),
+        )
+        .and_then(|()| {
+            let line = parse_single_response(&mut self.connection)?;
+
+            match line
+                .split_once(' ')
+                .map(|(op, val)| (op, Some(val)))
+                .unwrap_or((line.as_ref(), None))
+            {
+                ("locked", None) => Ok(()),
+                ("error", Some(error)) => Err(error.to_owned()),
+                _ => Err(format!("Unknown response: {line}")),
+            }
+        })
     }
 }
