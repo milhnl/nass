@@ -10,8 +10,27 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+const HELP: &str = "Usage:
+    pass ls
+        Displays password files with tree
+    pass show <name>
+        Displays a password
+    pass grep [grep-options...]
+        Search with grep in all decrypted password files
+    pass insert <name>
+        Create a new password from standard input
+    pass edit <name>
+        Edit a password with $EDITOR
+    pass generate [options...] <name> [length]
+        Generate a new password
+        -n                Only use alphanumerics
+    pass otp <path>
+        Show OTP code
+    pass help
+        Print help text
+";
+
 fn main() -> Result<(), String> {
-    let mut connection = proto::HimitsuProtocol::new()?;
     fn pass_show(
         connection: &mut impl Repository,
         path: &str,
@@ -76,7 +95,14 @@ fn main() -> Result<(), String> {
         Ok(())
     }
     let mut optparser = OptParser::new(env::args().skip(1));
-    match optparser.next().as_deref() {
+    let subcommand = optparser.next();
+    if subcommand.as_deref() == Some("help") {
+        print!("{HELP}");
+        return Ok(());
+    }
+
+    let mut connection = proto::HimitsuProtocol::new()?;
+    match subcommand.as_deref() {
         Some("ls") | None => pass_show(&mut connection, "/"),
         Some("insert") => {
             while optparser.next_opt().is_some() {}
