@@ -1,6 +1,6 @@
 use base64::{Engine as _, engine::general_purpose};
 use nass::himitsu_to_totp;
-use nass::keyandquery::{HimitsuKey, HimitsuQuery};
+use nass::keyandquery::HimitsuKey;
 use nass::optparser::{Argument, OptParser};
 use nass::proto;
 use nass::state::Repository;
@@ -36,9 +36,7 @@ fn main() -> Result<(), String> {
         path: &str,
     ) -> Result<(), String> {
         if path == "/" {
-            let keys = connection.disclose(
-                HimitsuQuery::from_components(["path".to_string()]).unwrap(),
-            )?;
+            let keys = connection.disclose(vec!["path".to_string()].into())?;
             let mut pass_files = himitsu_to_pass_files(keys.iter())
                 .into_keys()
                 .map(PathBuf::from)
@@ -77,11 +75,11 @@ fn main() -> Result<(), String> {
             });
         } else {
             let keys = connection.disclose(
-                HimitsuQuery::from_components([format!(
+                vec![format!(
                     "path={}",
                     path.strip_prefix('/').unwrap_or(path)
-                )])
-                .unwrap(),
+                )]
+                .into(),
             )?;
             let pass_files = himitsu_to_pass_files(keys.iter());
 
@@ -123,10 +121,8 @@ fn main() -> Result<(), String> {
             while optparser.next_opt().is_some() {}
             let name = optparser.next().ok_or("missing path")?;
             let name = name.strip_prefix('/').unwrap_or(&name);
-            let keys = connection.disclose(
-                HimitsuQuery::from_components([format!("path={name}")])
-                    .unwrap(),
-            )?;
+            let keys =
+                connection.disclose(vec![format!("path={name}")].into())?;
             let pass_files = himitsu_to_pass_files(keys.iter());
             let original = match pass_files.len() {
                 1 => pass_files.into_values().next().unwrap(),
@@ -186,10 +182,7 @@ fn main() -> Result<(), String> {
             if edited == original {
                 return Ok(());
             }
-            connection.delete(
-                HimitsuQuery::from_components([format!("path={name}")])
-                    .unwrap(),
-            )?;
+            connection.delete(vec![format!("path={name}")].into())?;
             pass_file_to_himitsu(name, &edited)
                 .into_iter()
                 .map(|key| connection.add(key))
@@ -201,11 +194,7 @@ fn main() -> Result<(), String> {
             let name = optparser.next().ok_or("missing path")?;
             let name = name.strip_prefix('/').unwrap_or(&name);
             let mut keys = connection.disclose(
-                HimitsuQuery::from_components([
-                    "proto=totp".into(),
-                    format!("path={name}"),
-                ])
-                .unwrap(),
+                vec!["proto=totp".into(), format!("path={name}")].into(),
             )?;
             match keys.len() {
                 1 => (),
@@ -265,9 +254,7 @@ fn main() -> Result<(), String> {
                 .map(|_| ())
         }
         Some("grep") => {
-            let keys = connection.disclose(
-                HimitsuQuery::from_components(["path".to_string()]).unwrap(),
-            )?;
+            let keys = connection.disclose(vec!["path".to_string()].into())?;
             let pass_files = himitsu_to_pass_files(keys.iter());
             let opts = &optparser.collect::<Vec<String>>();
             println!("{:?}", opts);

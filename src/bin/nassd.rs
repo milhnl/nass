@@ -112,10 +112,11 @@ fn handle_client(
                         }
                     }
                 }
-                let query = HimitsuQuery::from_components(optparser);
+                let query: HimitsuQuery =
+                    optparser.into_iter().collect::<Vec<_>>().into();
                 if decrypt {
-                    query
-                        .and_then(|query| state.disclose(query))
+                    state
+                        .disclose(query)
                         .and_then(|keys| {
                             keys.into_iter().try_for_each(|key| {
                                 reply(
@@ -129,8 +130,8 @@ fn handle_client(
                             reply_err(&mut unix_stream, err)
                         });
                 } else {
-                    query
-                        .and_then(|query| state.query(query))
+                    state
+                        .query(query)
                         .and_then(|keys| {
                             keys.into_iter().try_for_each(|key| {
                                 reply(

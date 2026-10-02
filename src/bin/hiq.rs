@@ -1,4 +1,3 @@
-use nass::keyandquery::HimitsuQuery;
 use nass::optparser::{Argument, OptParser};
 use nass::proto::HimitsuProtocol;
 use nass::state::Repository;
@@ -28,12 +27,11 @@ fn main() -> Result<(), String> {
     }
     let query = optparser.collect::<Vec<String>>();
     if decrypt {
-        let keys =
-            connection.disclose(HimitsuQuery::from_components(query)?)?;
+        let keys = connection.disclose(query.into())?;
         check_one(one, keys.len())?;
         keys.into_iter().for_each(|key| println!("{key}"))
     } else {
-        let keys = connection.query(HimitsuQuery::from_components(query)?)?;
+        let keys = connection.query(query.into())?;
         check_one(one, keys.len())?;
         keys.into_iter().for_each(|key| println!("{key}"))
     }

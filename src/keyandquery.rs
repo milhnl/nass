@@ -44,12 +44,10 @@ impl Display for RedactedHimitsuKey {
     }
 }
 
-impl FromStr for RedactedHimitsuKey {
-    type Err = String;
+impl TryFrom<Vec<String>> for RedactedHimitsuKey {
+    type Error = String;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let fields =
-            split(s).ok_or_else(|| "Could not split fields".to_string())?;
+    fn try_from(fields: Vec<String>) -> Result<Self, Self::Error> {
         fields
             .into_iter()
             .map(|mut pair| {
@@ -75,6 +73,16 @@ impl FromStr for RedactedHimitsuKey {
             })
             .collect::<Result<_, _>>()
             .map(HimitsuKey)
+    }
+}
+
+impl FromStr for RedactedHimitsuKey {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        split(s)
+            .ok_or_else(|| "Could not split fields".to_string())?
+            .try_into()
     }
 }
 
@@ -123,12 +131,10 @@ impl Display for CompleteHimitsuKey {
     }
 }
 
-impl FromStr for CompleteHimitsuKey {
-    type Err = String;
+impl TryFrom<Vec<String>> for CompleteHimitsuKey {
+    type Error = String;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let fields =
-            split(s).ok_or_else(|| "Could not split fields".to_string())?;
+    fn try_from(fields: Vec<String>) -> Result<Self, Self::Error> {
         fields
             .into_iter()
             .map(|mut pair| {
@@ -148,6 +154,16 @@ impl FromStr for CompleteHimitsuKey {
             })
             .collect::<Result<_, _>>()
             .map(HimitsuKey)
+    }
+}
+
+impl FromStr for CompleteHimitsuKey {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        split(s)
+            .ok_or_else(|| "Could not split fields".to_string())?
+            .try_into()
     }
 }
 
@@ -194,14 +210,12 @@ pub struct QueryField {
     pub secret: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HimitsuQuery(Vec<(String, QueryField)>, bool);
 
-impl HimitsuQuery {
-    pub fn from_components<T: IntoIterator<Item = String>>(
-        query: T,
-    ) -> Result<Self, String> {
-        Ok(HimitsuQuery(
+impl From<Vec<String>> for HimitsuQuery {
+    fn from(query: Vec<String>) -> Self {
+        HimitsuQuery(
             query
                 .into_iter()
                 .map(|mut pair| {
@@ -232,9 +246,11 @@ impl HimitsuQuery {
                 })
                 .collect(),
             false,
-        ))
+        )
     }
+}
 
+impl HimitsuQuery {
     pub fn r#match(&self, key: &impl HimitsuQueryMatchable) -> bool {
         key.r#match(self)
     }
@@ -270,9 +286,8 @@ impl FromStr for HimitsuQuery {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        split(s).map_or_else(
-            || Err("Could not split query".to_owned()),
-            HimitsuQuery::from_components,
-        )
+        split(s)
+            .ok_or_else(|| "Could not split query".to_owned())
+            .map(Into::into)
     }
 }
