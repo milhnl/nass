@@ -43,40 +43,44 @@ pub enum LockStatus {
 }
 
 //Thread API
-pub enum Message {
-    Add {
-        key: CompleteHimitsuKey,
-        reply: Sender<Result<Vec<RedactedHimitsuKey>, String>>,
-    },
-    Delete {
-        query: HimitsuQuery,
-        reply: Sender<Result<Vec<RedactedHimitsuKey>, String>>,
-    },
-    Query {
-        query: HimitsuQuery,
-        reply: Sender<Result<Vec<RedactedHimitsuKey>, String>>,
-    },
-    Disclose {
-        query: HimitsuQuery,
-        reply: Sender<Result<Vec<CompleteHimitsuKey>, String>>,
-    },
-    Update {
-        query: HimitsuQuery,
-        set: CompleteHimitsuKey,
-        reply: Sender<Result<Vec<RedactedHimitsuKey>, String>>,
-    },
-    Status {
-        reply: Sender<Result<Option<LockStatus>, String>>,
-    },
-    Lock {
-        lock: LockStatus,
-        reply: Sender<Result<(), String>>,
-    },
+pub enum RepositoryMessage {
+    Add(
+        (
+            CompleteHimitsuKey,
+            Sender<Result<Vec<RedactedHimitsuKey>, String>>,
+        ),
+    ),
+    Delete(
+        (
+            HimitsuQuery,
+            Sender<Result<Vec<RedactedHimitsuKey>, String>>,
+        ),
+    ),
+    Query(
+        (
+            HimitsuQuery,
+            Sender<Result<Vec<RedactedHimitsuKey>, String>>,
+        ),
+    ),
+    Disclose(
+        (
+            HimitsuQuery,
+            Sender<Result<Vec<CompleteHimitsuKey>, String>>,
+        ),
+    ),
+    Update(
+        (
+            (HimitsuQuery, CompleteHimitsuKey),
+            Sender<Result<Vec<RedactedHimitsuKey>, String>>,
+        ),
+    ),
+    Status(((), Sender<Result<Option<LockStatus>, String>>)),
+    Lock((LockStatus, Sender<Result<(), String>>)),
 }
 
 #[derive(Clone)]
 pub struct RepositoryClient {
-    tx: Sender<Message>,
+    tx: Sender<RepositoryMessage>,
 }
 
 impl RepositoryClient {
@@ -89,25 +93,27 @@ impl RepositoryClient {
             std::thread::spawn(move || {
                 for msg in rx {
                     match msg {
-                        Message::Add { key, reply } => {
+                        RepositoryMessage::Add((key, reply)) => {
                             reply.send(T::add(&mut actor, key)).unwrap()
                         }
-                        Message::Delete { query, reply } => {
+                        RepositoryMessage::Delete((query, reply)) => {
                             reply.send(T::delete(&mut actor, query)).unwrap()
                         }
-                        Message::Query { query, reply } => {
+                        RepositoryMessage::Query((query, reply)) => {
                             reply.send(T::query(&mut actor, query)).unwrap()
                         }
-                        Message::Disclose { query, reply } => {
+                        RepositoryMessage::Disclose((query, reply)) => {
                             reply.send(T::disclose(&mut actor, query)).unwrap()
                         }
-                        Message::Update { query, set, reply } => reply
-                            .send(T::update(&mut actor, query, set))
-                            .unwrap(),
-                        Message::Status { reply } => {
+                        RepositoryMessage::Update(((query, set), reply)) => {
+                            reply
+                                .send(T::update(&mut actor, query, set))
+                                .unwrap()
+                        }
+                        RepositoryMessage::Status(((), reply)) => {
                             reply.send(T::status(&mut actor)).unwrap()
                         }
-                        Message::Lock { lock, reply } => {
+                        RepositoryMessage::Lock((lock, reply)) => {
                             reply.send(T::lock(&mut actor, lock)).unwrap()
                         }
                     }
@@ -116,7 +122,11 @@ impl RepositoryClient {
             RepositoryClient { tx }
         })
     }
-    fn request<R>(&self, build: impl FnOnce(Sender<R>) -> Message) -> R {
+
+    fn request<R>(
+        &self,
+        build: impl FnOnce(Sender<Result<R, String>>) -> RepositoryMessage,
+    ) -> Result<R, String> {
         let (reply_tx, reply_rx) = channel();
 
         let msg = build(reply_tx);
@@ -135,38 +145,38 @@ impl Repository for RepositoryClient {
         &mut self,
         key: CompleteHimitsuKey,
     ) -> Result<Vec<RedactedHimitsuKey>, String> {
-        self.request(|reply| Message::Add { key, reply })
+        self.request(|reply| RepositoryMessage::Add((key, reply)))
     }
     fn delete(
         &mut self,
         query: HimitsuQuery,
     ) -> Result<Vec<RedactedHimitsuKey>, String> {
-        self.request(|reply| Message::Delete { query, reply })
+        self.request(|reply| RepositoryMessage::Delete((query, reply)))
     }
     fn query(
         &mut self,
         query: HimitsuQuery,
     ) -> Result<Vec<RedactedHimitsuKey>, String> {
-        self.request(|reply| Message::Query { query, reply })
+        self.request(|reply| RepositoryMessage::Query((query, reply)))
     }
     fn disclose(
         &mut self,
         query: HimitsuQuery,
     ) -> Result<Vec<CompleteHimitsuKey>, String> {
-        self.request(|reply| Message::Disclose { query, reply })
+        self.request(|reply| RepositoryMessage::Disclose((query, reply)))
     }
     fn update(
         &mut self,
         query: HimitsuQuery,
         set: CompleteHimitsuKey,
     ) -> Result<Vec<RedactedHimitsuKey>, String> {
-        self.request(|reply| Message::Update { query, set, reply })
+        self.request(|reply| RepositoryMessage::Update(((query, set), reply)))
     }
     fn status(&mut self) -> Result<Option<LockStatus>, String> {
-        self.request(|reply| Message::Status { reply })
+        self.request(|reply| RepositoryMessage::Status(((), reply)))
     }
     fn lock(&mut self, lock: LockStatus) -> Result<(), String> {
-        self.request(|reply| Message::Lock { lock, reply })
+        self.request(|reply| RepositoryMessage::Lock((lock, reply)))
     }
 }
 
