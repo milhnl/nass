@@ -70,7 +70,7 @@ impl Repository for PassRepository {
                             .take_if(|v| Some(*v) != prev.get(k))
                             .map(|v| (k, v))
                     })
-                    .map(|(k, v)| gpg_encrypt(&self.root, k, v.into())),
+                    .map(|(k, v)| gpg_encrypt(&self.root, k, v)),
             )
             .chain(prev.keys().filter(|k| !next.contains_key(*k)).map(|k| {
                 remove_file(self.root.join(format!("{k}.gpg")))
@@ -104,7 +104,7 @@ impl Repository for PassRepository {
                             .take_if(|v| Some(*v) != prev.get(k))
                             .map(|v| (k, v))
                     })
-                    .map(|(k, v)| gpg_encrypt(&self.root, k, v.into())),
+                    .map(|(k, v)| gpg_encrypt(&self.root, k, v)),
             )
             .chain(prev.keys().filter(|k| !next.contains_key(*k)).map(|k| {
                 remove_file(self.root.join(format!("{k}.gpg")))
@@ -181,7 +181,7 @@ impl Repository for PassRepository {
                             .take_if(|v| Some(*v) != prev.get(k))
                             .map(|v| (k, v))
                     })
-                    .map(|(k, v)| gpg_encrypt(&self.root, k, v.into())),
+                    .map(|(k, v)| gpg_encrypt(&self.root, k, v)),
             )
             .chain(prev.keys().filter(|k| !next.contains_key(*k)).map(|k| {
                 remove_file(self.root.join(format!("{k}.gpg")))
@@ -258,7 +258,7 @@ fn read_pass_files(root: &Path) -> Result<Vec<CompleteHimitsuKey>, String> {
                 })
                 .and_then(|status| {
                     if status.status.success() {
-                        Ok(String::from_utf8_lossy(&status.stdout).to_string())
+                        Ok(status.stdout)
                     } else {
                         Err(String::from_utf8_lossy(&status.stderr)
                             .to_string())
@@ -297,7 +297,7 @@ fn recipients_for(root: &Path, key: &str) -> Result<Vec<String>, String> {
         .collect::<Vec<String>>())
 }
 
-fn gpg_encrypt(root: &Path, key: &str, value: String) -> Result<(), String> {
+fn gpg_encrypt(root: &Path, key: &str, value: &[u8]) -> Result<(), String> {
     let recipients = recipients_for(root, key)?;
     let mut gpg = Command::new("gpg")
         .args(
@@ -320,21 +320,21 @@ fn gpg_encrypt(root: &Path, key: &str, value: String) -> Result<(), String> {
         })?;
 
     let mut stdin = gpg.stdin.take().ok_or("Failed to open stdin")?;
-    std::thread::spawn(move || {
-        stdin
-            .write_all(value.as_bytes())
-            .expect("Failed to write to stdin");
-    });
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            stdin.write_all(value).expect("Failed to write to stdin");
+        });
 
-    gpg.wait_with_output()
-        .map_err(|err| err.to_string())
-        .and_then(|status| {
-            if status.status.success() {
-                Ok(())
-            } else {
-                Err(String::from_utf8_lossy(&status.stderr).to_string())
-            }
-        })
+        gpg.wait_with_output()
+    })
+    .map_err(|err| err.to_string())
+    .and_then(|status| {
+        if status.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&status.stderr).to_string())
+        }
+    })
 }
 
 static PROPERTY: LazyLock<Regex> = LazyLock::new(|| {
@@ -343,10 +343,12 @@ static PROPERTY: LazyLock<Regex> = LazyLock::new(|| {
 
 pub fn pass_file_to_himitsu(
     path: &str,
-    content: &str,
+    content: &[u8],
 ) -> Vec<CompleteHimitsuKey> {
     let mut otp: Option<&str> = None;
-    let mut props = content
+    //Empty string falls through to 'file' proto
+    let mut props = std::str::from_utf8(content)
+        .unwrap_or_default()
         .lines()
         .enumerate()
         .filter_map(|(i, line)| {
@@ -476,17 +478,36 @@ pub fn himitsu_to_pass_files<
     T: Iterator<Item = &'a CompleteHimitsuKey>,
 >(
     keys: T,
-) -> HashMap<String, String> {
-    let mut map = HashMap::<String, Vec<String>>::new();
+) -> HashMap<String, Vec<u8>> {
+    enum PassFile {
+        Lines(Vec<String>),
+        Raw(Vec<u8>),
+    }
+    fn entry_lines<'m>(
+        map: &'m mut HashMap<String, PassFile>,
+        path: &str,
+    ) -> Option<&'m mut Vec<String>> {
+        match map
+            .entry(path.to_owned())
+            .or_insert_with(|| PassFile::Lines(vec![String::new()]))
+        {
+            PassFile::Lines(lines) => Some(lines),
+            PassFile::Raw(_) => {
+                eprintln!("Double pass path detected. Weird");
+                None
+            }
+        }
+    }
+    let mut map = HashMap::<String, PassFile>::new();
     keys.for_each(|key| {
         let Some((_, path)) = key.get("path") else {
             return;
         };
         match key.get("proto").map(|(_, v)| v.as_ref()) {
             Some("web") => {
-                let pass_lines = map
-                    .entry(path.to_string())
-                    .or_insert(Vec::from(["".into()]));
+                let Some(pass_lines) = entry_lines(&mut map, path) else {
+                    return;
+                };
                 if let Some(password) =
                     key.get("password").map(|password| password.1.to_owned())
                 {
@@ -507,9 +528,9 @@ pub fn himitsu_to_pass_files<
                     });
             }
             Some("totp") => {
-                let pass_lines = map
-                    .entry(path.to_string())
-                    .or_insert(Vec::from(["".into()]));
+                let Some(pass_lines) = entry_lines(&mut map, path) else {
+                    return;
+                };
                 match himitsu_to_totp(key) {
                     Ok(totp) => {
                         pass_lines.push(totp.to_uri());
@@ -517,32 +538,35 @@ pub fn himitsu_to_pass_files<
                     Err(err) => eprintln!("{err}"),
                 }
             }
-            Some("file")
-                if map
-                    .insert(
-                        path.to_string(),
-                        key.get("content")
-                            .ok_or(())
-                            .and_then(|(_, v)| {
-                                general_purpose::STANDARD
-                                    .decode(v)
-                                    .map_err(|err| eprintln!("{err}"))
-                            })
-                            .and_then(|v| {
-                                String::from_utf8(v)
-                                    .map_err(|err| eprintln!("{err}"))
-                            })
-                            .map(|v| vec![v])
-                            .unwrap_or_else(|_| Vec::new()),
-                    )
-                    .is_some() =>
-            {
-                eprintln!("Double pass path detected. Weird");
+            Some("file") => {
+                match key.get("content").ok_or(()).and_then(|(_, v)| {
+                    general_purpose::STANDARD
+                        .decode(v)
+                        .map_err(|err| eprintln!("{err}"))
+                }) {
+                    Ok(payload) => {
+                        if map
+                            .insert(path.to_string(), PassFile::Raw(payload))
+                            .is_some()
+                        {
+                            eprintln!("Double pass path detected. Weird");
+                        }
+                    }
+                    Err(()) => eprintln!("No content in file pass entry"),
+                }
             }
             _ => (),
         }
     });
-    map.iter()
-        .map(|(k, v)| (k.to_string(), v.join("\n") + "\n"))
-        .collect::<HashMap<_, _>>()
+    map.into_iter()
+        .map(|(path, file)| {
+            let bytes = match file {
+                PassFile::Lines(lines) => {
+                    (lines.join("\n") + "\n").into_bytes()
+                }
+                PassFile::Raw(payload) => payload,
+            };
+            (path, bytes)
+        })
+        .collect()
 }

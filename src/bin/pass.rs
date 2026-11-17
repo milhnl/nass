@@ -88,7 +88,9 @@ fn main() -> Result<(), String> {
                 0 => return Err("Received no keys".to_string()),
                 _ => return Err("Received multiple keys".to_string()),
             }
-            print!("{}", pass_files.into_iter().next().unwrap().1);
+            std::io::stdout()
+                .write_all(&pass_files.into_values().next().unwrap())
+                .map_err(|err| format!("Failed to write to stdout: {err}"))?;
         }
         Ok(())
     }
@@ -104,9 +106,9 @@ fn main() -> Result<(), String> {
         Some("ls") | None => pass_show(&mut connection, "/"),
         Some("insert") => {
             while optparser.next_opt().is_some() {}
-            let mut input = String::new();
+            let mut input = Vec::new();
             std::io::stdin()
-                .read_to_string(&mut input)
+                .read_to_end(&mut input)
                 .map_err(|err| err.to_string())?;
             pass_file_to_himitsu(
                 &optparser.next().ok_or("missing path")?,
@@ -170,7 +172,7 @@ fn main() -> Result<(), String> {
                     })
                 })
                 .and_then(|_stdout| {
-                    std::fs::read_to_string(&path).map_err(|err| {
+                    std::fs::read(&path).map_err(|err| {
                         format!("Could not read edited file: {err}")
                     })
                 });
@@ -277,7 +279,7 @@ fn main() -> Result<(), String> {
                     let value = value.clone();
                     std::thread::spawn(move || {
                         stdin
-                            .write_all(value.as_bytes())
+                            .write_all(value.as_slice())
                             .expect("Failed to write to stdin");
                     });
 
