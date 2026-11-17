@@ -42,41 +42,45 @@ pub enum LockStatus {
     Hard,
 }
 
-//Thread API
-pub enum RepositoryMessage {
-    Add(
-        (
-            CompleteHimitsuKey,
-            Sender<Result<Vec<RedactedHimitsuKey>, String>>,
-        ),
-    ),
-    Delete(
-        (
-            HimitsuQuery,
-            Sender<Result<Vec<RedactedHimitsuKey>, String>>,
-        ),
-    ),
-    Query(
-        (
-            HimitsuQuery,
-            Sender<Result<Vec<RedactedHimitsuKey>, String>>,
-        ),
-    ),
-    Disclose(
-        (
-            HimitsuQuery,
-            Sender<Result<Vec<CompleteHimitsuKey>, String>>,
-        ),
-    ),
-    Update(
-        (
-            (HimitsuQuery, CompleteHimitsuKey),
-            Sender<Result<Vec<RedactedHimitsuKey>, String>>,
-        ),
-    ),
-    Status(((), Sender<Result<Option<LockStatus>, String>>)),
-    Lock((LockStatus, Sender<Result<(), String>>)),
+//This is just a HKT for Rust. Ugly though, sorry. I wanted 'one type' for both
+pub trait RepositoryRequestMode {
+    type Item<Arguments, Output>;
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Direct;
+
+impl RepositoryRequestMode for Direct {
+    type Item<Arguments, Output> = Arguments;
+}
+
+struct WithReply;
+
+impl RepositoryRequestMode for WithReply {
+    type Item<Arguments, Output> = (Arguments, Sender<Result<Output, String>>);
+}
+
+/// A repository request whose representation is selected by `Mode`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RepositoryRequest<Mode: RepositoryRequestMode> {
+    Add(Mode::Item<CompleteHimitsuKey, Vec<RedactedHimitsuKey>>),
+    Delete(Mode::Item<HimitsuQuery, Vec<RedactedHimitsuKey>>),
+    Query(Mode::Item<HimitsuQuery, Vec<RedactedHimitsuKey>>),
+    Disclose(Mode::Item<HimitsuQuery, Vec<CompleteHimitsuKey>>),
+    Update(
+        Mode::Item<
+            (HimitsuQuery, CompleteHimitsuKey),
+            Vec<RedactedHimitsuKey>,
+        >,
+    ),
+    Status(Mode::Item<(), Option<LockStatus>>),
+    Lock(Mode::Item<LockStatus, ()>),
+}
+
+/// A serializable call to a [`Repository`].
+pub type RepositoryOperation = RepositoryRequest<Direct>;
+
+type RepositoryMessage = RepositoryRequest<WithReply>;
 
 #[derive(Clone)]
 pub struct RepositoryClient {
