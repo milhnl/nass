@@ -3,22 +3,22 @@ use nass::optparser::{Argument, OptParser};
 use nass::proto::SOCKET_PATH;
 use nass::state::{MultiplexedRepository, Repository, RepositoryClient};
 use shlex::{Quoter, split};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 fn handle_client(
-    mut unix_stream: UnixStream,
+    unix_stream: UnixStream,
     mut state: impl Repository,
 ) -> Result<(), String> {
-    fn reply(unix_stream: &mut UnixStream, msg: &str) -> Result<(), String> {
-        unix_stream
-            .write(msg.as_bytes())
+    fn reply(writer: &mut impl Write, msg: &str) -> Result<(), String> {
+        writer
+            .write_all(msg.as_bytes())
             .map_err(|_| "Failed at writing onto the unix stream")?;
         Ok(())
     }
-    fn reply_err(unix_stream: &mut UnixStream, err: impl AsRef<str>) {
+    fn reply_err(writer: &mut impl Write, err: impl AsRef<str>) {
         reply(
-            unix_stream,
+            writer,
             &format!(
                 "error {}\n",
                 Quoter::new().allow_nul(true).quote(err.as_ref()).unwrap()
@@ -31,6 +31,7 @@ fn handle_client(
     let reader = BufReader::new(
         unix_stream.try_clone().map_err(|err| format!("{err}"))?,
     );
+    let mut writer = BufWriter::new(unix_stream);
     let mut update_query = Option::<HimitsuQuery>::None;
     for message in reader.lines() {
         let message = message.map_err(|err| format!("{err}"))?;
@@ -43,15 +44,15 @@ fn handle_client(
                     })
                     .and_then(|keys| {
                         keys.into_iter().try_for_each(|key| {
-                            reply(&mut unix_stream, &format!("key {key}\n"))
+                            reply(&mut writer, &format!("key {key}\n"))
                         })
                     })
-                    .and_then(|()| reply(&mut unix_stream, "end\n"))
-                    .unwrap_or_else(|err| reply_err(&mut unix_stream, err));
+                    .and_then(|()| reply(&mut writer, "end\n"))
+                    .unwrap_or_else(|err| reply_err(&mut writer, err));
             }
             _ if update_query.is_some() => {
                 reply(
-                    &mut unix_stream,
+                    &mut writer,
                     "error \"command after update should be set\"\n",
                 )?;
                 update_query = None;
@@ -61,22 +62,22 @@ fn handle_client(
                     .parse()
                     .and_then(|query| {
                         update_query = Some(query);
-                        reply(&mut unix_stream, "update\n")
+                        reply(&mut writer, "update\n")
                     })
-                    .unwrap_or_else(|err| reply_err(&mut unix_stream, err));
+                    .unwrap_or_else(|err| reply_err(&mut writer, err));
             }
 
-            ("status", _) => reply(&mut unix_stream, "status unlocked\n")?,
+            ("status", _) => reply(&mut writer, "status unlocked\n")?,
             ("add", key) => {
                 key.parse()
                     .and_then(|key| state.add(key))
                     .and_then(|keys| {
                         keys.into_iter().try_for_each(|key| {
-                            reply(&mut unix_stream, &format!("key {key}\n"))
+                            reply(&mut writer, &format!("key {key}\n"))
                         })
                     })
-                    .and_then(|()| reply(&mut unix_stream, "end\n"))
-                    .unwrap_or_else(|err| reply_err(&mut unix_stream, err));
+                    .and_then(|()| reply(&mut writer, "end\n"))
+                    .unwrap_or_else(|err| reply_err(&mut writer, err));
             }
             ("del", query) => {
                 query
@@ -84,18 +85,15 @@ fn handle_client(
                     .and_then(|query| state.delete(query))
                     .and_then(|keys| {
                         keys.into_iter().try_for_each(|key| {
-                            reply(&mut unix_stream, &format!("key {key}\n"))
+                            reply(&mut writer, &format!("key {key}\n"))
                         })
                     })
-                    .and_then(|()| reply(&mut unix_stream, "end\n"))
-                    .unwrap_or_else(|err| reply_err(&mut unix_stream, err));
+                    .and_then(|()| reply(&mut writer, "end\n"))
+                    .unwrap_or_else(|err| reply_err(&mut writer, err));
             }
             ("query", query) => {
                 let Some(query) = split(query) else {
-                    reply(
-                        &mut unix_stream,
-                        "error \"could not parse query\"\n",
-                    )?;
+                    reply(&mut writer, "error \"could not parse query\"\n")?;
                     continue;
                 };
                 let mut decrypt = false;
@@ -105,7 +103,7 @@ fn handle_client(
                         Argument::Short('d') => decrypt = true,
                         _ => {
                             reply(
-                                &mut unix_stream,
+                                &mut writer,
                                 &format!("error \"unknown option {opt:?}\"\n"),
                             )?;
                             continue;
@@ -119,38 +117,29 @@ fn handle_client(
                         .disclose(query)
                         .and_then(|keys| {
                             keys.into_iter().try_for_each(|key| {
-                                reply(
-                                    &mut unix_stream,
-                                    &format!("key {key}\n"),
-                                )
+                                reply(&mut writer, &format!("key {key}\n"))
                             })
                         })
-                        .and_then(|()| reply(&mut unix_stream, "end\n"))
-                        .unwrap_or_else(|err| {
-                            reply_err(&mut unix_stream, err)
-                        });
+                        .and_then(|()| reply(&mut writer, "end\n"))
+                        .unwrap_or_else(|err| reply_err(&mut writer, err));
                 } else {
                     state
                         .query(query)
                         .and_then(|keys| {
                             keys.into_iter().try_for_each(|key| {
-                                reply(
-                                    &mut unix_stream,
-                                    &format!("key {key}\n"),
-                                )
+                                reply(&mut writer, &format!("key {key}\n"))
                             })
                         })
-                        .and_then(|()| reply(&mut unix_stream, "end\n"))
-                        .unwrap_or_else(|err| {
-                            reply_err(&mut unix_stream, err)
-                        });
+                        .and_then(|()| reply(&mut writer, "end\n"))
+                        .unwrap_or_else(|err| reply_err(&mut writer, err));
                 }
             }
             (command, _) => reply(
-                &mut unix_stream,
+                &mut writer,
                 &format!("error \"unknown command: {command}\"\n"),
             )?,
         }
+        writer.flush().map_err(|err| err.to_string())?;
     }
     Ok(())
 }
