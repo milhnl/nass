@@ -1,12 +1,13 @@
+mod operation;
 use crate::keyandquery::{
     CompleteHimitsuKey, HimitsuKey, HimitsuQuery, RedactedHimitsuKey,
 };
 use crate::state::{LockStatus, Repository};
+pub use operation::read_protocol_command;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 fn query_socket(
     connection: &mut BufReader<UnixStream>,
@@ -19,59 +20,48 @@ fn query_socket(
         .and(Ok(()))
 }
 
+fn parse_single_response(
+    connection: &mut impl BufRead,
+) -> Result<Option<(String, Vec<String>)>, String> {
+    read_protocol_command(connection)
+        .map_err(|err| err.to_string())
+        .flatten()
+        .map(|response| {
+            response.map(|mut response| (response.remove(0), response))
+        })
+}
+
 fn parse_keys_response<Field>(
     connection: &mut impl BufRead,
 ) -> Result<Vec<HimitsuKey<Field>>, String>
 where
-    HimitsuKey<Field>: FromStr,
+    HimitsuKey<Field>: TryFrom<Vec<String>, Error = String>,
 {
     let mut keys = Vec::new();
 
-    for line in connection.lines() {
-        let line = line.map_err(|err| err.to_string())?;
+    loop {
+        let (name, rest) =
+            parse_single_response(connection).and_then(|res| {
+                res.ok_or_else(|| {
+                    "Connection closed before an end response".to_owned()
+                })
+            })?;
 
-        match line
-            .split_once(' ')
-            .map(|(op, val)| (op, Some(val)))
-            .unwrap_or((line.as_ref(), None))
-        {
-            ("key", Some(encoded)) => {
-                let key = HimitsuKey::<Field>::from_str(encoded)
-                    .map_err(|_| format!("Invalid key response: {encoded}"))?;
-                keys.push(key);
-            }
-            ("error", Some(error)) => {
-                return Err(error.to_owned());
-            }
-            ("end", None) => {
-                return Ok(keys);
-            }
+        match name.as_str() {
+            "key" => keys.push(HimitsuKey::<Field>::try_from(rest)?),
+            "error" => return Err(rest.join(" ")),
+            "end" if rest.is_empty() => return Ok(keys),
             _ => {
-                return Err(format!("Unknown response: {line}"));
+                return Err(format!(
+                    "Unknown response: {}",
+                    std::iter::once(name)
+                        .chain(rest)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
             }
         }
     }
-
-    Err("Connection closed before an end response".into())
-}
-
-fn parse_single_response(
-    connection: &mut impl BufRead,
-) -> Result<String, String> {
-    let mut line = String::new();
-    connection
-        .read_line(&mut line)
-        .map_err(|err| err.to_string())
-        .and_then(|size| {
-            if size == 0 {
-                Err("No response from socket".to_owned())
-            } else {
-                if line.ends_with('\n') {
-                    line.pop();
-                }
-                Ok(line)
-            }
-        })
 }
 
 pub struct HimitsuProtocol {
@@ -139,28 +129,51 @@ impl Repository for HimitsuProtocol {
         query: HimitsuQuery,
         set: CompleteHimitsuKey,
     ) -> Result<Vec<RedactedHimitsuKey>, String> {
-        query_socket(
-            &mut self.connection,
-            &format!("update {query}\nset {set}\n"),
-        )
-        .and_then(|()| parse_keys_response(&mut self.connection))
+        query_socket(&mut self.connection, &format!("update {query}\n"))
+            .and_then(|()| parse_single_response(&mut self.connection))
+            .and_then(|res| {
+                res.ok_or_else(|| {
+                    "Connection closed before update acknowledged".to_owned()
+                })
+            })
+            .and_then(|(name, rest)| match name.as_str() {
+                "update" => Ok(()),
+                "error" => Err(rest.join(" ")),
+                _ => Err(format!(
+                    "Unknown update response: {} {}",
+                    name,
+                    rest.join(" ")
+                )),
+            })
+            .and_then(|()| {
+                query_socket(&mut self.connection, &format!("set {set}\n"))
+            })
+            .and_then(|()| parse_keys_response(&mut self.connection))
     }
     fn status(&mut self) -> Result<Option<LockStatus>, String> {
-        query_socket(&mut self.connection, "status\n").and_then(|()| {
-            let line = parse_single_response(&mut self.connection)?;
-
-            match line
-                .split_once(' ')
-                .map(|(op, val)| (op, Some(val)))
-                .unwrap_or((line.as_ref(), None))
-            {
-                ("status", Some("unlocked")) => Ok(None),
-                ("status", Some("soft_locked")) => Ok(Some(LockStatus::Soft)),
-                ("status", Some("hard_locked")) => Ok(Some(LockStatus::Hard)),
-                ("error", Some(error)) => Err(error.to_owned()),
-                _ => Err(format!("Unknown response: {line}")),
-            }
-        })
+        query_socket(&mut self.connection, "status\n")
+            .and_then(|()| parse_single_response(&mut self.connection))
+            .and_then(|res| {
+                res.ok_or_else(|| {
+                    "Connection closed before status response".to_owned()
+                })
+            })
+            .and_then(|(name, rest)| {
+                match (name.as_str(), rest.get(0).map(String::as_str)) {
+                    ("status", Some("unlocked")) => Ok(None),
+                    ("status", Some("soft_locked")) => {
+                        Ok(Some(LockStatus::Soft))
+                    }
+                    ("status", Some("hard_locked")) => {
+                        Ok(Some(LockStatus::Hard))
+                    }
+                    ("error", _) => Err(rest.join(" ")),
+                    _ => Err(format!(
+                        "Unknown response: {name} {}",
+                        rest.join(" ")
+                    )),
+                }
+            })
     }
     fn lock(&mut self, lock: LockStatus) -> Result<(), String> {
         query_socket(
@@ -170,18 +183,16 @@ impl Repository for HimitsuProtocol {
                 if lock == LockStatus::Soft { " -s" } else { "" }
             ),
         )
-        .and_then(|()| {
-            let line = parse_single_response(&mut self.connection)?;
-
-            match line
-                .split_once(' ')
-                .map(|(op, val)| (op, Some(val)))
-                .unwrap_or((line.as_ref(), None))
-            {
-                ("locked", None) => Ok(()),
-                ("error", Some(error)) => Err(error.to_owned()),
-                _ => Err(format!("Unknown response: {line}")),
-            }
+        .and_then(|()| parse_single_response(&mut self.connection))
+        .and_then(|res| {
+            res.ok_or_else(|| {
+                "Connection closed before status response".to_owned()
+            })
+        })
+        .and_then(|(name, rest)| match name.as_str() {
+            "locked" => Ok(()),
+            "error" => Err(rest.join(" ")),
+            _ => Err(format!("Unknown response: {name} {}", rest.join(" "))),
         })
     }
 }
