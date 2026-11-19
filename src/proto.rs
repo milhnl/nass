@@ -1,9 +1,12 @@
 mod operation;
+pub use operation::read_protocol_command;
+mod reply;
 use crate::keyandquery::{
     CompleteHimitsuKey, HimitsuKey, HimitsuQuery, RedactedHimitsuKey,
 };
 use crate::state::{LockStatus, Repository};
-pub use operation::read_protocol_command;
+pub use operation::read_repository_operation;
+pub use reply::RepositoryReply;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

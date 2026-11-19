@@ -1,8 +1,7 @@
-use nass::keyandquery::{CompleteHimitsuKey, HimitsuQuery};
-use nass::optparser::{Argument, OptParser};
-use nass::proto::{SOCKET_PATH, read_protocol_command};
-use nass::state::{MultiplexedRepository, Repository, RepositoryClient};
-use shlex::Quoter;
+use nass::proto::{RepositoryReply, SOCKET_PATH, read_repository_operation};
+use nass::state::{
+    MultiplexedRepository, Repository, RepositoryClient, RepositoryOperation,
+};
 use std::io::{BufReader, BufWriter, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -10,135 +9,49 @@ fn handle_client(
     unix_stream: UnixStream,
     mut state: impl Repository,
 ) -> Result<(), String> {
-    fn reply(writer: &mut impl Write, msg: &str) -> Result<(), String> {
-        writer
-            .write_all(msg.as_bytes())
-            .map_err(|_| "Failed at writing onto the unix stream")?;
-        Ok(())
-    }
-    fn reply_err(writer: &mut impl Write, err: impl AsRef<str>) {
-        reply(
-            writer,
-            &format!(
-                "error {}\n",
-                Quoter::new().allow_nul(true).quote(err.as_ref()).unwrap()
-            ),
-        )
-        .unwrap_or_else(|err| {
-            eprintln!("Error while reporting an error to the client: {err}")
-        })
-    }
     let mut reader = BufReader::new(
         unix_stream.try_clone().map_err(|err| format!("{err}"))?,
     );
     let mut writer = BufWriter::new(unix_stream);
-    let mut update_query = Option::<HimitsuQuery>::None;
     loop {
-        let command = read_protocol_command(&mut reader)
+        let command = read_repository_operation(&mut reader, &mut writer)
             .map_err(|err| err.to_string())?;
-        let mut command = match command {
+        let command = match command {
             Ok(Some(command)) => command,
             Ok(None) => return Ok(()),
             Err(err) => {
-                reply_err(&mut writer, err);
+                write!(writer, "{}", RepositoryReply::Error(err))
+                    .map_err(|err| err.to_string())?;
                 writer.flush().map_err(|err| err.to_string())?;
                 continue;
             }
         };
-        let name = command.remove(0);
-        match (name.as_str(), command) {
-            ("set", query) if update_query.is_some() => {
-                CompleteHimitsuKey::try_from(query)
-                    .and_then(|query| {
-                        state.update(update_query.take().unwrap(), query)
-                    })
-                    .and_then(|keys| {
-                        keys.into_iter().try_for_each(|key| {
-                            reply(&mut writer, &format!("key {key}\n"))
-                        })
-                    })
-                    .and_then(|()| reply(&mut writer, "end\n"))
-                    .unwrap_or_else(|err| reply_err(&mut writer, err));
-            }
-            _ if update_query.is_some() => {
-                reply(
-                    &mut writer,
-                    "error \"command after update should be set\"\n",
-                )?;
-                update_query = None;
-            }
-            ("update", query) => {
-                update_query = Some(query.into());
-                reply(&mut writer, "update\n")?;
-            }
 
-            ("status", _) => reply(&mut writer, "status unlocked\n")?,
-            ("add", key) => {
-                CompleteHimitsuKey::try_from(key)
-                    .and_then(|key| state.add(key))
-                    .and_then(|keys| {
-                        keys.into_iter().try_for_each(|key| {
-                            reply(&mut writer, &format!("key {key}\n"))
-                        })
-                    })
-                    .and_then(|()| reply(&mut writer, "end\n"))
-                    .unwrap_or_else(|err| reply_err(&mut writer, err));
+        let reply = match command {
+            RepositoryOperation::Add(key) => {
+                state.add(key).map(RepositoryReply::Keys)
             }
-            ("del", query) => {
-                state
-                    .delete(query.into())
-                    .and_then(|keys| {
-                        keys.into_iter().try_for_each(|key| {
-                            reply(&mut writer, &format!("key {key}\n"))
-                        })
-                    })
-                    .and_then(|()| reply(&mut writer, "end\n"))
-                    .unwrap_or_else(|err| reply_err(&mut writer, err));
+            RepositoryOperation::Delete(query) => {
+                state.delete(query).map(RepositoryReply::Keys)
             }
-            ("query", query) => {
-                let mut decrypt = false;
-                let mut optparser = OptParser::new(query.into_iter());
-                while let Some(opt) = optparser.next_opt() {
-                    match opt {
-                        Argument::Short('d') => decrypt = true,
-                        _ => {
-                            reply(
-                                &mut writer,
-                                &format!("error \"unknown option {opt:?}\"\n"),
-                            )?;
-                            continue;
-                        }
-                    }
-                }
-                let query: HimitsuQuery =
-                    optparser.into_iter().collect::<Vec<_>>().into();
-                if decrypt {
-                    state
-                        .disclose(query)
-                        .and_then(|keys| {
-                            keys.into_iter().try_for_each(|key| {
-                                reply(&mut writer, &format!("key {key}\n"))
-                            })
-                        })
-                        .and_then(|()| reply(&mut writer, "end\n"))
-                        .unwrap_or_else(|err| reply_err(&mut writer, err));
-                } else {
-                    state
-                        .query(query)
-                        .and_then(|keys| {
-                            keys.into_iter().try_for_each(|key| {
-                                reply(&mut writer, &format!("key {key}\n"))
-                            })
-                        })
-                        .and_then(|()| reply(&mut writer, "end\n"))
-                        .unwrap_or_else(|err| reply_err(&mut writer, err));
-                }
+            RepositoryOperation::Query(query) => {
+                state.query(query).map(RepositoryReply::Keys)
             }
-            (command, _) => reply(
-                &mut writer,
-                &format!("error \"unknown command: {command}\"\n"),
-            )?,
+            RepositoryOperation::Disclose(query) => {
+                state.disclose(query).map(RepositoryReply::DisclosedKeys)
+            }
+            RepositoryOperation::Update((query, set)) => {
+                state.update(query, set).map(RepositoryReply::Keys)
+            }
+            RepositoryOperation::Status(()) => {
+                state.status().map(RepositoryReply::Status)
+            }
+            RepositoryOperation::Lock(lock) => {
+                state.lock(lock).map(|()| RepositoryReply::Locked)
+            }
         }
+        .unwrap_or_else(RepositoryReply::Error);
+        write!(writer, "{reply}").map_err(|err| err.to_string())?;
         writer.flush().map_err(|err| err.to_string())?;
     }
 }
