@@ -172,7 +172,7 @@ impl Repository for PassRepository {
                 key.update(set.clone())
             }
         });
-        let next = himitsu_to_pass_files(keys.iter().chain([&set]));
+        let next = himitsu_to_pass_files(keys.iter());
         let res = std::iter::empty()
             .chain(
                 next.keys()
